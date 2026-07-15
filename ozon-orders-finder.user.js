@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ozon Orders Finder
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      1.1
 // @description  Фильтр заказов на странице архива Ozon по диапазону цены с поддержкой динамической подгрузки
 // @author       p166
 // @homepageURL  https://github.com/p166/ozon-orders-finder
