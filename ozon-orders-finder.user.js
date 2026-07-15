@@ -1290,6 +1290,7 @@
         `;
 
         const stopRow = document.createElement('div');
+        stopRow.id = 'ozof-stop-row';
         stopRow.style.cssText = 'margin-top: 10px; display: none;';
 
         const btnStop = document.createElement('button');
