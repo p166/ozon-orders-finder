@@ -595,7 +595,7 @@
             }
             renderYearIndicators(allYears, currentYear);
 
-            const batchSize = 3;
+            const batchSize = 10;
             for (let i = 0; i < total; i += batchSize) {
                 if (scanAbortController.signal.aborted) break;
 
