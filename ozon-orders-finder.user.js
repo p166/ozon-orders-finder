@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ozon Orders Finder
 // @namespace    http://tampermonkey.net/
-// @version      1.8
+// @version      1.11
 // @description  Фильтр заказов на странице архива Ozon по диапазону цены с поддержкой динамической подгрузки и базой данных товаров
 // @author       p166
 // @homepageURL  https://github.com/p166/ozon-orders-finder
@@ -18,6 +18,7 @@
 
     const SETTINGS_KEY = 'ozon_orders_finder_settings';
     const DATA_KEY = 'ozon_orders_finder_data';
+    const SCAN_QUEUE_KEY = 'ozon_orders_finder_scan_queue';
 
     let blocksObserver = null;
     let yearObserver = null;
@@ -146,6 +147,28 @@
     function saveData(data) {
         try {
             localStorage.setItem(DATA_KEY, JSON.stringify(data));
+        } catch (e) {}
+    }
+
+    function getScanQueue() {
+        try {
+            const raw = localStorage.getItem(SCAN_QUEUE_KEY);
+            if (!raw) return [];
+            return JSON.parse(raw);
+        } catch (e) {
+            return [];
+        }
+    }
+
+    function saveScanQueue(queue) {
+        try {
+            localStorage.setItem(SCAN_QUEUE_KEY, JSON.stringify(queue));
+        } catch (e) {}
+    }
+
+    function clearScanQueue() {
+        try {
+            localStorage.removeItem(SCAN_QUEUE_KEY);
         } catch (e) {}
     }
 
@@ -427,8 +450,8 @@
         return order;
     }
 
-    async function scanAllOrders(onProgress) {
-        if (isScanning) return;
+    async function scanAllOrders(onProgress, force = false) {
+        if (!force && isScanning) return 0;
         isScanning = true;
         scanAbortController = new AbortController();
 
@@ -480,17 +503,130 @@
             data[currentYear] = yearData;
             saveData(data);
 
-            alert(`Сканирование завершено. Обработано ${processed} заказов`);
             updateScanButton();
+            return processed;
         } catch (e) {
             console.error('Scan error:', e);
             alert('Ошибка при сканировании: ' + e.message);
+            return 0;
         } finally {
             isScanning = false;
             scanAbortController = null;
             if (btnScan) btnScan.disabled = false;
             updateScanButton();
         }
+    }
+
+    async function waitForOrders() {
+        return new Promise((resolve) => {
+            let attempts = 0;
+            const maxAttempts = 20;
+            const check = () => {
+                const blocks = document.querySelectorAll('.w9d_11');
+                if (blocks.length > 0 || attempts >= maxAttempts) {
+                    resolve();
+                } else {
+                    attempts++;
+                    setTimeout(check, 500);
+                }
+            };
+            check();
+        });
+    }
+
+    async function scanAllYears() {
+        if (isScanning) return;
+        isScanning = true;
+
+        const btnScanAll = document.getElementById('ozof-scan-all');
+        if (btnScanAll) btnScanAll.disabled = true;
+
+        try {
+            const filtersSection = document.querySelector('[data-widget="orderFilters"]');
+            if (!filtersSection) {
+                alert('Не найдены фильтры по годам');
+                return;
+            }
+
+            const yearEls = Array.from(filtersSection.querySelectorAll('.a2p5_7_0-a5'));
+            const years = yearEls.map(el => el.textContent.trim()).filter(y => /^\d{4}$/.test(y));
+            
+            if (years.length === 0) {
+                alert('Годы не найдены');
+                return;
+            }
+
+            const data = getSavedData();
+            const queue = years.filter(year => {
+                const yearData = data[year];
+                return !(yearData && yearData.orders && yearData.orders.length > 0);
+            });
+
+            if (queue.length === 0) {
+                alert('Все годы уже отсканированы');
+                return;
+            }
+
+            saveScanQueue(queue);
+            
+            const nextYear = queue[0];
+            const url = new URL(window.location.href);
+            url.searchParams.set('selectedYear', nextYear);
+            window.location.href = url.toString();
+        } catch (e) {
+            console.error('Scan all years error:', e);
+            alert('Ошибка при сканировании: ' + e.message);
+            isScanning = false;
+            if (btnScanAll) btnScanAll.disabled = false;
+        }
+    }
+
+    async function processScanQueue() {
+        const queue = getScanQueue();
+        if (queue.length === 0) return;
+
+        let totalProcessed = 0;
+        let currentQueue = queue;
+
+        while (currentQueue.length > 0) {
+            const nextYear = currentQueue[0];
+            const currentYearFromQueue = getYearFromUrl();
+            
+            if (currentYearFromQueue !== nextYear) {
+                return;
+            }
+
+            const remainingQueue = currentQueue.slice(1);
+            saveScanQueue(remainingQueue);
+            
+            const data = getSavedData();
+            const yearData = data[currentYearFromQueue] || { orders: [] };
+            yearData.scannedAt = new Date().toISOString();
+            data[currentYearFromQueue] = yearData;
+            saveData(data);
+
+            const processed = await scanAllOrders((p, total) => {
+                const statusEl = document.getElementById('ozof-status');
+                if (statusEl) {
+                    statusEl.textContent = `Сканирование ${currentYearFromQueue}: ${p}/${total}`;
+                }
+            }, true);
+
+            totalProcessed += processed;
+            currentQueue = getScanQueue();
+
+            if (currentQueue.length > 0) {
+                const nextYear = currentQueue[0];
+                const url = new URL(window.location.href);
+                url.searchParams.set('selectedYear', nextYear);
+                window.location.href = url.toString();
+                return;
+            }
+        }
+
+        isScanning = false;
+        updateScanButton();
+        alert(`Сканирование всех годов завершено. Обработано ${totalProcessed} заказов`);
     }
 
     function showOrdersModal() {
@@ -591,6 +727,31 @@
         closeBtn.onmouseenter = () => closeBtn.style.background = '#f5f5f5';
         closeBtn.onmouseleave = () => closeBtn.style.background = 'none';
         closeBtn.onclick = () => modal.remove();
+
+        const clearBtn = document.createElement('button');
+        clearBtn.textContent = 'Очистить';
+        clearBtn.style.cssText = `
+            background: #fff;
+            border: 1px solid #d3d3d3;
+            padding: 6px 12px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 13px;
+            color: #d32f2f;
+            margin-right: 8px;
+        `;
+        clearBtn.onmouseenter = () => clearBtn.style.background = '#ffebee';
+        clearBtn.onmouseleave = () => clearBtn.style.background = '#fff';
+        clearBtn.onclick = () => {
+            if (confirm('Удалить все сканированные данные?')) {
+                saveData({});
+                modal.remove();
+                updateScanButton();
+            }
+        };
+
+        header.appendChild(clearBtn);
+        header.appendChild(closeBtn);
 
         const controls = document.createElement('div');
         controls.style.cssText = `
@@ -948,6 +1109,22 @@
 
         scanRow.appendChild(btnScan);
 
+        const btnScanAll = document.createElement('button');
+        btnScanAll.textContent = 'Сканировать все года';
+        btnScanAll.style.cssText = `
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #d3d3d3;
+            border-radius: 8px;
+            background: #fff;
+            color: #0f0f0f;
+            cursor: pointer;
+            font-weight: 500;
+            margin-top: 8px;
+        `;
+        btnScanAll.addEventListener('click', scanAllYears);
+        scanRow.appendChild(btnScanAll);
+
         const statusEl = document.createElement('div');
         statusEl.id = 'ozof-status';
         statusEl.style.cssText = `
@@ -974,12 +1151,16 @@
             if (!confirmed) return;
 
             btnScan.textContent = 'Сканирование...';
-            await scanAllOrders((processed, total) => {
+            const processed = await scanAllOrders((p, total) => {
+                const statusEl = document.getElementById('ozof-status');
                 if (statusEl) {
-                    statusEl.textContent = `Сканирование: ${processed}/${total}`;
+                    statusEl.textContent = `Сканирование: ${p}/${total}`;
                 }
             });
-            updateScanButton();
+            btnScan.textContent = hasScanned ? 'Пересканировать' : 'Сканировать';
+            if (processed > 0) {
+                alert(`Сканирование завершено. Обработано ${processed} заказов`);
+            }
         });
 
         btnAllOrders.addEventListener('click', showOrdersModal);
@@ -1017,6 +1198,8 @@
                 updateScanButton();
             }
         }, 1000);
+
+        processScanQueue();
     }
 
     if (document.readyState === 'loading') {
